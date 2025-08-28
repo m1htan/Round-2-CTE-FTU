@@ -1,2 +1,43 @@
-# Auto detect text files and perform LF normalization
+# ---------- DÒNG KẾT THÚC (EOL) ----------
+
+# Tự động xử lý dòng kết thúc phù hợp hệ điều hành
 * text=auto
+
+# Luôn dùng LF cho file code Python, shell, config...
+*.py     text eol=lf
+*.sh     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.ini    text eol=lf
+*.cfg    text eol=lf
+*.toml   text eol=lf
+*.env    text eol=lf
+
+# ---------- NHẬN DIỆN FILE NHỊ PHÂN ----------
+
+*.jpg    binary
+*.jpeg   binary
+*.png    binary
+*.gif    binary
+*.svg    binary
+*.ico    binary
+*.zip    binary
+*.gz     binary
+*.tar    binary
+*.rar    binary
+*.pdf    binary
+*.exe    binary
+*.dll    binary
+
+# ---------- IGNORE FILE KHI EXPORT ----------
+
+# Không đưa các file này vào bản phát hành khi dùng `git archive`
+.gitattributes export-ignore
+.gitignore     export-ignore
+.env           export-ignore
+.vscode/       export-ignore
+__pycache__/   export-ignore
+*.pyc          export-ignore
