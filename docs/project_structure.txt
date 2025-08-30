@@ -1,0 +1,15 @@
+Round-2-CTE-FTU
+    config
+        .env
+    data
+
+    docs
+        steps_by_steps.txt
+        project_structure.txt
+    logs
+    main
+        crawl_data.py
+        validation_data.py
+    test
+        test_connections.py
+        test_login.py

@@ -21,8 +21,8 @@ df = client.Fetch_Trading_Data(
     tickers = tickers,
     fields = ['open','high','low','close','volume','bu','sd','fn','fs','fb'],
     adjusted=True,
-    from_date='2024-12-04',
-    to_date = '1m'
+    from_date='2024-08-01',
+    to_date = '2025-08-01'
     ).get_data()
 
 print(df)
