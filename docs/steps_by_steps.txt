@@ -1,3 +1,6 @@
+---
+Step 1:
+---
 1. Crawl data sử dụng FiinQuant (File crawl_data.py trong thư mục main)
     Crawl của 3 sàn: VNINDEX (HOSE), HNXIndex (HNX), UPCOMIndex (UPCOM)
 2. Gom toàn bộ dữ liệu vào thành 1 df duy nhất
@@ -5,3 +8,7 @@
 4. Kiểm tra độ tin cậy dữ liệu (kiểm tra sơ lược ban đầu)
 5. Tiền xử lý dữ liệu (xóa duplicates, fill out missing data, ...)
 6. EDA
+---
+Step 2:
+---
+1. Fundamental Indicators

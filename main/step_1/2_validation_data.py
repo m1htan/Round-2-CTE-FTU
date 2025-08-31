@@ -1,6 +1,6 @@
 import pandas as pd
 
-df = pd.read_csv('../../data/all_stocks_2022-01-01_to_2025-08-30.csv')
+df = pd.read_csv('../../data/raw_stocks.csv')
 
 def validate_data(df, check_missing_for_ticker=None):
     report = {}

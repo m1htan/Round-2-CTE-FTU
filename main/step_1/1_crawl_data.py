@@ -51,9 +51,9 @@ def fetch_ohlcv_by_exchange(tickers, from_date, to_date=None, fields=None,
         return out
     return pd.DataFrame()
 
-# Crawl cho 3 sàn
+# Crawl
 all_data = []
-for index in ["VNINDEX", "HNXIndex", "UPCOMIndex"]:
+for index in ["HNXIndex"]:
     try:
         tickers = client.TickerList(ticker=index)
         tickers = sorted(set(tickers))
@@ -74,7 +74,7 @@ if all_data:
     print(df_all.head())
 
     # Export CSV
-    out_path = f"../../data/all_stocks_{from_date}_to_{to_date}.csv"
+    out_path = f"../../data/raw_stocks.csv"
     df_all.to_csv(out_path, index=False)
     print(f"Đã lưu file: {out_path}")
 else:
