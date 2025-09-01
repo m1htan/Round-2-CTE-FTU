@@ -1,0 +1,2 @@
+organizationId,ticker,year,quarter,ratios.ProfitabilityRatio.EBITMargin,ratios.ProfitabilityRatio.ROA,ratios.ProfitabilityRatio.ROE,ratios.ProfitabilityRatio.ROIC,ratios.ValuationRatios.BasicEPS,ratios.ValuationRatios.PriceToBook,ratios.ValuationRatios.PriceToEarning,ratios.Growth.NetRevenueGrowthYoY,ratios.Growth.GrossProfitGrowthYoY,period_end_date
+2714,ADC,2025,2,0.0106227,0.06931771,0.14641027,0.16813872,395.16340761,0.99645452,6.51361974,-0.28359325,-0.27317715,2025-06-30
