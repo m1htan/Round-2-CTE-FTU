@@ -1,555 +1,708 @@
-from __future__ import annotations
 import os
-import re
-from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple, Union
 from FiinQuantX import FiinSession
-
 import pandas as pd
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, date
+import time
+import re
+import json
+import random
 from dotenv import load_dotenv
 
-
-# ----------------------------
-# Utilities
-# ----------------------------
-def _ensure_list(x: Union[str, Iterable[str], None]) -> List[str]:
-    if x is None:
-        return []
-    if isinstance(x, str):
-        return [x]
-    return list(x)
-
-def _safe_get(d: dict, path: str, default=None):
-    """Get nested key with dot-path (e.g., 'ProfitabilityRatio.ROE')."""
-    cur = d
-    for k in path.split("."):
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return cur
-
-def _normalize_ratios_payload(raw) -> pd.DataFrame:
-    """
-    Chuẩn hóa phản hồi get_ratios thành DataFrame có cột:
-      [Ticker, Period, Values]
-
-    Hỗ trợ 3 dạng payload:
-    1) dict: { "HPG": { "2024Q4": {...}, ... }, "VCB": {...} }
-    2) dict + list: { "HPG": [ {"Period":"2024Q4","Values":{...}}, ... ] }
-    3) list: [ {"Ticker":"HPG","Period":"2024Q4","Values":{...}}, ... ]
-    """
-    records = []
-
-    if raw is None:
-        return pd.DataFrame(columns=["Ticker","Period","Values"])
-
-    # Case 3: top-level list
-    if isinstance(raw, list):
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            ticker = item.get("Ticker") or item.get("ticker")
-            period = item.get("Period") or item.get("period") or ""
-            values = item.get("Values") or item.get("values") or {
-                k: v for k, v in item.items() if k not in ("Ticker","ticker","Period","period")
-            }
-            if ticker is None:
-                # Thử nội suy từ trường khác nếu vendor không đặt "Ticker" trong item
-                ticker = item.get("Symbol") or item.get("symbol")
-            records.append({"Ticker": ticker, "Period": period, "Values": values})
-        return pd.DataFrame.from_records(records)
-
-    # Case 1/2: top-level dict
-    if isinstance(raw, dict):
-        for ticker, payload in raw.items():
-            # Case 1: dict of periods
-            if isinstance(payload, dict):
-                for period_key, vals in payload.items():
-                    records.append({"Ticker": ticker, "Period": period_key, "Values": vals})
-            # Case 2: list of {Period, Values}
-            elif isinstance(payload, list):
-                for item in payload:
-                    if not isinstance(item, dict):
-                        continue
-                    period = item.get("Period") or item.get("period") or ""
-                    values = item.get("Values") or item.get("values") or item
-                    records.append({"Ticker": ticker, "Period": period, "Values": values})
-            else:
-                # Không rõ cấu trúc -> lưu thô
-                records.append({"Ticker": ticker, "Period": "", "Values": payload})
-        return pd.DataFrame.from_records(records)
-
-    # Fallback: kiểu không hỗ trợ
-    return pd.DataFrame(columns=["Ticker","Period","Values"])
-
-
-def _normalize_fs_payload(raw) -> pd.DataFrame:
-    """
-    Chuẩn hóa phản hồi get_financeStatement thành [Ticker, Period, Values],
-    hỗ trợ top-level dict hoặc list.
-    """
-    records = []
-
-    if raw is None:
-        return pd.DataFrame(columns=["Ticker","Period","Values"])
-
-    if isinstance(raw, list):
-        # list phẳng kiểu [{Ticker,Period,Values}, ...] hoặc item thiếu Ticker
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            ticker = item.get("Ticker") or item.get("ticker") or item.get("Symbol") or item.get("symbol")
-            period = item.get("Period") or item.get("period") or ""
-            values = item.get("Values") or item.get("values") or {
-                k: v for k, v in item.items() if k not in ("Ticker","ticker","Symbol","symbol","Period","period")
-            }
-            records.append({"Ticker": ticker, "Period": period, "Values": values})
-        return pd.DataFrame.from_records(records)
-
-    if isinstance(raw, dict):
-        for ticker, payload in raw.items():
-            if isinstance(payload, dict):
-                for period_key, vals in payload.items():
-                    records.append({"Ticker": ticker, "Period": period_key, "Values": vals})
-            elif isinstance(payload, list):
-                for item in payload:
-                    if not isinstance(item, dict):
-                        continue
-                    period = item.get("Period") or item.get("period") or ""
-                    values = item.get("Values") or item.get("values") or item
-                    records.append({"Ticker": ticker, "Period": period, "Values": values})
-            else:
-                records.append({"Ticker": ticker, "Period": "", "Values": payload})
-        return pd.DataFrame.from_records(records)
-
-    return pd.DataFrame(columns=["Ticker","Period","Values"])
-
-
-_period_re = re.compile(r"(?P<year>\d{4}).*?(?P<q>[1-4])", re.IGNORECASE)
-
-def _period_sort_key(period: str) -> Tuple[int,int]:
-    """
-    Best-effort parse Period to (year, quarter). Works with '2024Q4', 'Q4-2024', etc.
-    Unknown -> (0,0).
-    """
-    if not isinstance(period, str):
-        return (0,0)
-    m = _period_re.search(period)
-    if not m:
-        # try year only
-        y = re.findall(r"\d{4}", period)
-        return (int(y[0]) if y else 0, 0)
-    return (int(m.group("year")), int(m.group("q")))
-
-def _sum_skip_none(series: Iterable[Optional[float]]) -> Optional[float]:
-    vals = [v for v in series if v is not None]
-    return sum(vals) if vals else None
-
-def _div_safe(a: Optional[float], b: Optional[float]) -> Optional[float]:
-    if a is None or b in (None, 0):
-        return None
-    return a / b
-
-# ----------------------------
-# Core
-# ----------------------------
-@dataclass
-class FundamentalIndicators:
-    client: object  # FiinQuantX session (already logged in)
-
-    # Ratio-level field map (from get_ratios)
-    default_field_map: Dict[str, str] = field(default_factory=lambda: {
-        # Valuation
-        "PE": "ValuationRatio.PE",
-        "PB": "ValuationRatio.PB",
-        "DividendYield": "ValuationRatio.DividendYield",
-        # Some vendors may expose EV/EBITDA directly:
-        "EV_EBITDA": "ValuationRatio.EV_EBITDA",  # primary candidate
-        # alt fallbacks will be tried at runtime
-        # Profitability
-        "ROE": "ProfitabilityRatio.ROE",
-        "ROA": "ProfitabilityRatio.ROA",
-        "NetMargin": "ProfitabilityRatio.NetMargin",
-        "GrossMargin": "ProfitabilityRatio.GrossMargin",
-        "OperatingMargin": "ProfitabilityRatio.OperatingMargin",
-        "EBITDAMargin": "ProfitabilityRatio.EBITDAMargin",
-        # Growth
-        "SalesGrowth": "GrowthRatio.SalesGrowth",
-        "EPSGrowth": "GrowthRatio.EPSGrowth",
-        # Efficiency / Leverage / Liquidity
-        "AssetTurnover": "EfficiencyRatio.AssetTurnover",
-        "DebtToEquity": "LeverageRatio.DebtToEquity",
-        "InterestCoverage": "LeverageRatio.InterestCoverage",
-        "CurrentRatio": "LiquidityRatio.CurrentRatio",
-        "QuickRatio": "LiquidityRatio.QuickRatio",
-        # Per-share
-        "EPS": "PerShare.EPS",
-        "BVPS": "PerShare.BVPS",
-        "SPS": "PerShare.SPS",
-        # FCF per share (if vendor provides)
-        "FCFPS": "PerShare.FCFPS",
-    })
-
-    # Finance statement field map (from get_financeStatement)
-    # These are *section or dot paths* to extract raw values if ratios don't provide.
-    default_fs_field_map: Dict[str, str] = field(default_factory=lambda: {
-        "Revenue": "IncomeStatement.Revenue",
-        "EBITDA": "IncomeStatement.EBITDA",
-        "OperatingCashFlow": "CashFlow.OperatingCashFlow",
-        "CapitalExpenditure": "CashFlow.CapitalExpenditure",  # aka CAPEX (usually negative outflow)
-        "FreeCashFlow": "CashFlow.FreeCashFlow",
-        "NetIncome": "IncomeStatement.NetIncome",
-        "SharesOutstanding": "PerShare.SharesOutstanding",
-        "TotalDebt": "BalanceSheet.TotalDebt",
-        "CashAndCashEquivalents": "BalanceSheet.CashAndCashEquivalents",
-    })
-
-    # Alternate ratio paths to try if main key missing
-    ev_ebitda_ratio_fallbacks: List[str] = field(default_factory=lambda: [
-        "ValuationRatio.EVOverEBITDA",
-        "ValuationRatio.EVToEBITDA",
-        "ValuationRatio.EV_EBITDA",
-    ])
-
-    def fetch_ratios(
-        self,
-        tickers: Union[str, Iterable[str]],
-        timefilter: str,
-        latest_year: int,
-        n_periods: int,
-        consolidated: bool,
-        fields: Optional[Iterable[str]] = None,
-    ) -> pd.DataFrame:
-        tickers = _ensure_list(tickers)
-        kwargs = dict(
-            tickers=tickers,
-            TimeFilter=timefilter,
-            LatestYear=latest_year,
-            NumberOfPeriod=n_periods,
-            Consolidated=consolidated,
-        )
-        if fields:
-            kwargs["Fields"] = list(fields)
-        fa = self.client.FundamentalAnalysis()
-        raw = fa.get_ratios(**kwargs)
-        df = _normalize_ratios_payload(raw)
-        df["TimeFilter"] = timefilter
-        df["Consolidated"] = consolidated
-        return df
-
-    def fetch_finance_statements(
-            self,
-            tickers: Union[str, Iterable[str]],
-            statement: Union[str, Iterable[str]] = "full",
-            years: Optional[Iterable[int]] = None,
-            quarters: Optional[Iterable[int]] = None,
-            audited: bool = True,
-            type_: str = "consolidated",
-            fields: Optional[Iterable[str]] = None,
-    ) -> pd.DataFrame:
-        """
-        Gọi FiinQuantX FundamentalAnalysis().get_financeStatement và chuẩn hóa.
-        Lưu ý: SDK thực tế KHÔNG nhận list/tuple cho 'statement', nên:
-          - nếu statement là iterable và có >1 phần tử -> dùng 'full'
-          - nếu statement là iterable và có 1 phần tử -> lấy phần tử đó (string)
-          - nếu là string -> giữ nguyên
-        """
-        tickers = _ensure_list(tickers)
-
-        # Chuẩn hóa 'statement' thành string
-        if isinstance(statement, (list, tuple, set)):
-            statement = list(statement)
-            if len(statement) == 0:
-                statement = "full"
-            elif len(statement) == 1:
-                statement = str(statement[0])
-            else:
-                statement = "full"
-        elif not isinstance(statement, str) or not statement:
-            statement = "full"
-
-        kwargs = dict(
-            tickers=tickers,
-            statement=statement,  # <-- luôn là string
-            years=list(years) if years is not None else None,
-            quarters=list(quarters) if quarters is not None else None,
-            audited=audited,
-            type=type_,
-        )
-        if fields:
-            kwargs["fields"] = list(fields)
-
-        fa = self.client.FundamentalAnalysis()
-        raw = fa.get_financeStatement(**kwargs)
-        return _normalize_fs_payload(raw)
-
-    # -------- Extraction helpers --------
-    def _extract_ratios(self, values_dict: dict, ratio_map: Dict[str,str]) -> Dict[str, Optional[float]]:
-        out = {}
-        for name, path in ratio_map.items():
-            out[name] = _safe_get(values_dict, path, default=None)
-        # EV/EBITDA: if primary None, try fallbacks
-        if out.get("EV_EBITDA") is None:
-            for p in self.ev_ebitda_ratio_fallbacks:
-                val = _safe_get(values_dict, p, default=None)
-                if val is not None:
-                    out["EV_EBITDA"] = val
-                    break
-        return out
-
-    def _extract_fs_values(self, values_dict: dict, fs_map: Dict[str,str]) -> Dict[str, Optional[float]]:
-        out = {}
-        for k, path in fs_map.items():
-            out[k] = _safe_get(values_dict, path, default=None)
-        return out
-
-    # -------- TTM aggregation helpers --------
-    def _build_ttm(self, df_q: pd.DataFrame, cols_sum: List[str], cols_ratio_defs: Dict[str, Tuple[str,str]]) -> pd.DataFrame:
-        """
-        Compute TTM per ticker using last 4 quarterly periods:
-        - cols_sum: fields to sum across 4 quarters (e.g., Revenue, EBITDA, OCF, CAPEX, FCF, NetIncome)
-        - cols_ratio_defs: mapping {new_col: (num_col, den_col)} -> compute sum(num)/sum(den)
-        """
-        if df_q.empty:
-            return pd.DataFrame(columns=df_q.columns)
-
-        df_q = df_q.copy()
-        df_q["_year"], df_q["_q"] = zip(*df_q["Period"].map(_period_sort_key))
-        df_q = df_q.sort_values(["Ticker","_year","_q"])
-
-        out_rows = []
-        for tkr, g in df_q.groupby("Ticker", sort=False):
-            g = g[g["_q"]>0]  # quarterly rows only
-            if len(g) < 4:
-                continue
-            # rolling window of 4
-            for i in range(3, len(g)):
-                win = g.iloc[i-3:i+1]
-                row = {
-                    "Ticker": tkr,
-                    "Period": f"TTM@{win.iloc[-1]['Period']}",
-                    "TimeFilter": "Quarterly",
-                    "Consolidated": win.iloc[-1]["Consolidated"],
-                }
-                # sums
-                for c in cols_sum:
-                    row[f"TTM:{c}"] = _sum_skip_none(win[c]) if c in win else None
-                # ratios as sum(num)/sum(den)
-                for newc, (numc, denc) in cols_ratio_defs.items():
-                    s_num = _sum_skip_none(win[numc]) if numc in win else None
-                    s_den = _sum_skip_none(win[denc]) if denc in win else None
-                    row[newc] = _div_safe(s_num, s_den)
-                out_rows.append(row)
-        if not out_rows:
-            return pd.DataFrame(columns=["Ticker","Period","TimeFilter","Consolidated"] + [f"TTM:{c}" for c in cols_sum] + list(cols_ratio_defs.keys()))
-        return pd.DataFrame(out_rows)
-
-    # -------- Main API --------
-    def build_indicator_frame(
-        self,
-        tickers: Union[str, Iterable[str]],
-        timefilter: str = "Quarterly",
-        latest_year: int = 2024,
-        n_periods: int = 12,
-        consolidated: bool = True,
-        include: Optional[Iterable[str]] = None,
-        # FS enrichment
-        addl_fields_fs: Optional[Iterable[str]] = None,
-        fs_statement: Union[str, Iterable[str]] = "full",
-        fs_years: Optional[Iterable[int]] = None,
-        fs_quarters: Optional[Iterable[int]] = None,
-        fs_audited: bool = True,
-        fs_type: str = "consolidated",
-        # mapping overrides
-        field_map_override: Optional[Dict[str, str]] = None,
-        fs_field_map_override: Optional[Dict[str, str]] = None,
-        # TTM options
-        compute_ttm: bool = True,
-    ) -> pd.DataFrame:
-
-        # 0) Resolve field maps
-        ratio_map = self.default_field_map.copy()
-        if field_map_override:
-            ratio_map.update(field_map_override)
-
-        fs_map = self.default_fs_field_map.copy()
-        if fs_field_map_override:
-            fs_map.update(fs_field_map_override)
-
-        # 1) Determine indicators to include
-        default_include = [
-            # base
-            "PE","PB","ROE","ROA","EPS","EPSGrowth","SalesGrowth",
-            "NetMargin","GrossMargin","OperatingMargin","EBITDAMargin",
-            "AssetTurnover","DebtToEquity","InterestCoverage",
-            "CurrentRatio","QuickRatio","DividendYield",
-            # added
-            "FCFPS", "EV_EBITDA",
-            # derived from FS when needed:
-            "FCF_per_share", "CAPEX_over_Sales", "OCF_over_NetIncome",
-        ]
-        include = list(include) if include is not None else default_include
-
-        # 2) Fetch ratios (try to request only needed fields)
-        request_ratio_paths = []
-        for k in include:
-            if k in ratio_map:
-                request_ratio_paths.append(ratio_map[k])
-        # Ensure we also request EV/EBITDA fallbacks
-        request_ratio_paths += [p for p in self.ev_ebitda_ratio_fallbacks if p not in request_ratio_paths]
-
-        df_rat = self.fetch_ratios(
-            tickers=tickers,
-            timefilter=timefilter,
-            latest_year=latest_year,
-            n_periods=n_periods,
-            consolidated=consolidated,
-            fields=request_ratio_paths if request_ratio_paths else None,
-        )
-
-        # 3) Flatten ratio indicators from 'Values'
-        rows = []
-        for _, r in df_rat.iterrows():
-            vals = r["Values"] if isinstance(r["Values"], dict) else {}
-            flat = self._extract_ratios(vals, ratio_map)
-            rows.append({
-                "Ticker": r["Ticker"],
-                "Period": r["Period"],
-                "TimeFilter": r["TimeFilter"],
-                "Consolidated": r["Consolidated"],
-                **flat,
-            })
-        out = pd.DataFrame(rows)
-
-        # 4) Optionally fetch finance statements to support derived metrics
-        fs_df = pd.DataFrame()
-        if addl_fields_fs:
-            # derive years/quarters if not provided (SDK requires 'years')
-            tfq = str(timefilter).lower().startswith("quarter")
-            if fs_years is None:
-                need_years = max(1, (n_periods + 3) // 4) if tfq else max(1, n_periods)
-                fs_years_eff = [latest_year - i for i in range(need_years)]
-            else:
-                fs_years_eff = list(fs_years)
-
-            fs_quarters_eff = list(fs_quarters) if fs_quarters is not None else ([1, 2, 3, 4] if tfq else None)
-
-            fs_df = self.fetch_finance_statements(
-                tickers=tickers,
-                statement=fs_statement,  # nhớ đã vá thành "full" ở hàm fetch_finance_statements
-                years=fs_years_eff,  # <-- luôn là list[int], không để None
-                quarters=fs_quarters_eff,  # <-- Quarterly thì [1,2,3,4], Yearly thì None
-                audited=fs_audited,
-                type_=fs_type,
-                fields=addl_fields_fs,
-            )
-            ...
-
-            # Build a flattened FS table with targeted fields (using fs_map paths)
-            fs_rows = []
-            for _, r in fs_df.iterrows():
-                vals = r["Values"] if isinstance(r["Values"], dict) else {}
-                flat_fs = self._extract_fs_values(vals, fs_map)
-                fs_rows.append({
-                    "Ticker": r["Ticker"],
-                    "Period": r["Period"],
-                    **flat_fs,
-                })
-            fs_flat = pd.DataFrame(fs_rows)
-            out = out.merge(fs_flat, on=["Ticker","Period"], how="left")
-
-        # 5) Derive extra metrics from FS if ratio not present
-        # FCF per share
-        if "FCF_per_share" in include:
-            # prefer ratio FCFPS if available
-            if "FCFPS" in out.columns:
-                out["FCF_per_share"] = out["FCFPS"]
-            else:
-                fcf = out.get("FreeCashFlow")
-                shs = out.get("SharesOutstanding")
-                if fcf is not None and shs is not None:
-                    out["FCF_per_share"] = out.apply(lambda x: _div_safe(x.get("FreeCashFlow"), x.get("SharesOutstanding")), axis=1)
-                else:
-                    out["FCF_per_share"] = None
-
-        # EV/EBITDA: nếu ratios không có EV_EBITDA nhưng có EV và EBITDA (hiếm)
-        # Ở đây giả định vendor sẽ trả trực tiếp EV/EBITDA qua ratio; nếu không thì để None.
-        # (Tự tính EV đòi hỏi giá thị trường -> MarketCap, không có trong FS chuẩn.)
-        if "EV_EBITDA" in include and "EV_EBITDA" not in out.columns:
-            out["EV_EBITDA"] = None  # giữ cột để downstream không lỗi
-
-        # EBITDA Margin (nếu ratios không có, tự tính từ FS)
-        if "EBITDAMargin" in include:
-            if "EBITDAMargin" not in out.columns:
-                out["EBITDAMargin"] = out.apply(
-                    lambda x: _div_safe(x.get("EBITDA"), x.get("Revenue")), axis=1
-                ) if ("EBITDA" in out and "Revenue" in out) else None
-
-        # CAPEX/Sales
-        if "CAPEX_over_Sales" in include:
-            out["CAPEX_over_Sales"] = out.apply(
-                lambda x: _div_safe(x.get("CapitalExpenditure"), x.get("Revenue")), axis=1
-            ) if ("CapitalExpenditure" in out and "Revenue" in out) else None
-
-        # OCF/NetIncome
-        if "OCF_over_NetIncome" in include:
-            out["OCF_over_NetIncome"] = out.apply(
-                lambda x: _div_safe(x.get("OperatingCashFlow"), x.get("NetIncome")), axis=1
-            ) if ("OperatingCashFlow" in out and "NetIncome" in out) else None
-
-        # 6) Sắp xếp cột
-        core_cols = ["Ticker","Period","TimeFilter","Consolidated"]
-        metric_cols = [c for c in include if c in out.columns]
-        derived_cols = [c for c in ["FCF_per_share","CAPEX_over_Sales","OCF_over_NetIncome"] if c in out.columns]
-        fs_cols = [c for c in out.columns if c not in core_cols + metric_cols + derived_cols and c not in ["Values"]]
-        # Đảm bảo order: core -> metrics -> derived -> FS (nếu có)
-        ordered = core_cols + metric_cols + derived_cols + [c for c in fs_cols if c not in metric_cols+derived_cols]
-        out = out[ordered].sort_values(["Ticker"], kind="stable").reset_index(drop=True)
-
-        # 7) TTM (Quarterly only) — cộng dồn 4 quý gần nhất
-        if compute_ttm and timefilter.lower().startswith("quarter"):
-            # Xác định các trường cần sum để hỗ trợ ratios TTM
-            cols_sum = [c for c in ["Revenue","EBITDA","OperatingCashFlow","CapitalExpenditure","FreeCashFlow","NetIncome"] if c in out.columns]
-            # Các tỷ lệ TTM cần tính từ tổng (num/den)
-            cols_ratio_defs = {}
-            if "EBITDAMargin" in include:
-                # TTM: sum(EBITDA)/sum(Revenue)
-                if ("EBITDA" in out.columns) and ("Revenue" in out.columns):
-                    cols_ratio_defs["TTM:EBITDAMargin"] = ("EBITDA","Revenue")
-            if "CAPEX_over_Sales" in include and ("CapitalExpenditure" in out.columns) and ("Revenue" in out.columns):
-                cols_ratio_defs["TTM:CAPEX_over_Sales"] = ("CapitalExpenditure","Revenue")
-            if "OCF_over_NetIncome" in include and ("OperatingCashFlow" in out.columns) and ("NetIncome" in out.columns):
-                cols_ratio_defs["TTM:OCF_over_NetIncome"] = ("OperatingCashFlow","NetIncome")
-
-            ttm_df = self._build_ttm(out, cols_sum=cols_sum, cols_ratio_defs=cols_ratio_defs)
-
-            # Ghép các trường TTM về frame chính (left join theo (Ticker, Period=TTM@last_q))
-            if not ttm_df.empty:
-                out = out.merge(ttm_df, on=["Ticker","Period","TimeFilter","Consolidated"], how="left")
-
-        return out
-
-df_tickers = pd.read_csv("../../data/cleaned_stocks.csv")
 load_dotenv(dotenv_path='../../config/.env')
 
 USERNAME = os.getenv("FIINQUANT_USERNAME")
 PASSWORD = os.getenv("FIINQUANT_PASSWORD")
 
 client = FiinSession(username=USERNAME, password=PASSWORD).login()
-fi = FundamentalIndicators(client)
+# Khoảng thời gian như bạn yêu cầu
+FROM_DATE = pd.Timestamp("2022-01-01")
+TO_DATE   = pd.Timestamp("2025-08-30")
 
-ticker = df_tickers["ticker"].dropna().unique().tolist()
+# Type theo yêu cầu
+FIN_TYPE = "consolidated"
 
-df = fi.build_indicator_frame(
-    tickers=ticker,
-    timefilter="Quarterly",
-    latest_year=2025,
-    n_periods=12,
-    consolidated=True,
-    addl_fields_fs=["IncomeStatement","CashFlow","BalanceSheet","PerShare"],
-    fs_statement="full",
-    fs_audited=True,
-    fs_type="consolidated",
-    compute_ttm=True,)
+# ------------------------------------------------
 
-df.to_csv('../../data/df_all.csv')
+# Batching khi gọi API get_ratios
+BATCH_SIZE = 10
+BATCH_SLEEP_SEC = 0.2  # nghỉ nhẹ giữa các batch để tránh rate limit
+
+# ---------- Helper: thời gian/quarter ----------
+def quarter_of_month(m: int) -> int:
+    return (m - 1) // 3 + 1
+
+def quarter_end_date(year: int, q: int) -> pd.Timestamp:
+    if q == 1: return pd.Timestamp(year=year, month=3, day=31)
+    if q == 2: return pd.Timestamp(year=year, month=6, day=30)
+    if q == 3: return pd.Timestamp(year=year, month=9, day=30)
+    if q == 4: return pd.Timestamp(year=year, month=12, day=31)
+    raise ValueError("quarter must be 1..4")
+
+def years_and_quarters_in_range(start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Tuple[List[int], List[int]]:
+    """Trả về YEARS = [start_year..end_year], QUARTERS = [1,2,3,4].
+       Lý do: API get_ratios nhận list năm/quý. Ta sẽ lọc theo period_end_date sau."""
+    years = list(range(start_ts.year, end_ts.year + 1))
+    quarters = [1, 2, 3, 4]
+    return years, quarters
+
+# ---------- Helper: xử lý OHLCV ----------
+def add_year_quarter_from_timestamp(df: pd.DataFrame, ts_col: str = "timestamp") -> pd.DataFrame:
+    out = df.copy()
+    out[ts_col] = pd.to_datetime(out[ts_col])
+    out["year"] = out[ts_col].dt.year
+    out["quarter"] = ((out[ts_col].dt.month - 1) // 3 + 1).astype(int)
+    # Chuẩn ticker viết hoa để đồng nhất
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    return out
+
+def extract_hnx_tickers(ohlcv: pd.DataFrame) -> List[str]:
+    # Nếu file chỉ chứa HNX thì đơn giản:
+    # Nếu có cột "Exchange", có thể lọc:
+    #   ohlcv = ohlcv.loc[ohlcv["Exchange"].str.upper().eq("HNX")]
+    return pd.Index(ohlcv["ticker"].astype(str).str.upper().unique()).tolist()
+
+# ---------- Helper: tìm keys an toàn ----------
+def normalize_key(k: str) -> str:
+    # Bỏ non-alnum, upper-case để so sánh an toàn: "P/E" -> "PE", "BookValuePerShare" -> "BOOKVALUEPERSHARE"
+    return re.sub(r"[^A-Za-z0-9]+", "", str(k)).upper()
+
+CANONICAL_KEYS = {"PE", "PB", "ROE", "EPS", "BVPS"}
+
+# Một số synonym phổ biến (đề phòng vendor đặt tên hơi khác)
+SYNONYM_TO_CANON = {
+    "PBR": "PB",
+    "PRICETOBOOK": "PB",
+    "PRICEBOOK": "PB",
+    "BOOKVALUEPERSHARE": "BVPS",
+    "BVPERPSHARE": "BVPS",
+    "BVPS": "BVPS",
+    "EPSBASIC": "EPS",
+    "RETURNONEQUITY": "ROE",
+    "ROEA": "ROE",
+    "PRICEEARNING": "PE",
+    "PRICEEARNINGRATIO": "PE",
+    "PERATIO": "PE",
+}
+
+SYNONYM_TO_CANON.update({
+    "EARNINGSPERSHARE": "EPS",
+    "EARNINGSPERSHAREBASIC": "EPS",
+    "BASICEPS": "EPS",
+    "DILUTEDEPS": "EPS",
+    "EPSDILUTED": "EPS",
+    "EPSADJUSTED": "EPS",
+    "BVPERSHARE": "BVPS",
+    "BOOKVALUEPS": "BVPS",
+    "BOOKVALUESHARE": "BVPS",
+})
+
+def canonical_of(key: str) -> Optional[str]:
+    k = normalize_key(key)
+    if k in CANONICAL_KEYS:
+        return k
+    return SYNONYM_TO_CANON.get(k)
+
+def deep_find_ratios(obj: Any, targets: set) -> Dict[str, Any]:
+    """Duyệt sâu dict/list; tìm các key phù hợp PE, PB, ROE, EPS, BVPS (kể cả synonym)."""
+    found: Dict[str, Any] = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            canon = canonical_of(k)
+            if canon in targets and canon not in found:
+                # Ưu tiên key đầu tiên tìm thấy; nếu cần ưu tiên TTM hay Basic có thể chỉnh logic ở đây
+                found[canon] = v
+            # Duyệt sâu
+            child_found = deep_find_ratios(v, targets)
+            for ck, cv in child_found.items():
+                if ck not in found:
+                    found[ck] = cv
+    elif isinstance(obj, list):
+        for v in obj:
+            child_found = deep_find_ratios(v, targets)
+            for ck, cv in child_found.items():
+                if ck not in found:
+                    found[ck] = cv
+    return found
+
+def call_with_retry(fn, max_retries=5, base_sleep=0.5, max_sleep=8.0, *args, **kwargs):
+    """Gọi fn(*args, **kwargs) với retry/backoff. Ném exception cuối nếu thất bại."""
+    attempt = 0
+    while True:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            attempt += 1
+            if attempt > max_retries:
+                raise
+            sleep_s = min(max_sleep, base_sleep * (2 ** (attempt - 1))) * (1 + 0.2 * random.random())
+            print(f"[WARN] Retry {attempt}/{max_retries} after error: {e}. Sleeping ~{sleep_s:.2f}s")
+            time.sleep(sleep_s)
+
+def iter_quarter_after(year: int, q: int) -> tuple[int, int]:
+    q += 1
+    if q > 4:
+        return year + 1, 1
+    return year, q
+
+def compute_quarter_params(from_date: pd.Timestamp, to_date: pd.Timestamp) -> tuple[int, int]:
+    """
+    Trả về (LatestYear, NumberOfPeriod) cho TimeFilter='Quarterly'
+    sao cho cover các quý có period_end_date trong [from_date, to_date].
+    """
+    # Xác định quý bắt đầu (kết thúc quý >= from_date)
+    y, q = int(from_date.year), int((from_date.month - 1)//3 + 1)
+    start_end = quarter_end_date(y, q)
+    while start_end < from_date:
+        y, q = iter_quarter_after(y, q)
+        start_end = quarter_end_date(y, q)
+
+    # Lặp đến quý cuối có end_date <= to_date
+    quarters = []
+    cy, cq = y, q
+    while True:
+        endd = quarter_end_date(cy, cq)
+        if endd > to_date:
+            break
+        quarters.append((cy, cq))
+        cy, cq = iter_quarter_after(cy, cq)
+
+    if not quarters:
+        # Không có quý nào trọn vẹn trong khoảng → vẫn trả về quý của to_date để lib trả dữ liệu,
+        # rồi ta sẽ lọc sau (ratios_df sẽ rỗng nếu không khớp).
+        last_year = to_date.year
+        return last_year, 1
+
+    last_year = quarters[-1][0]
+    num_periods = len(quarters)
+    return last_year, num_periods
+
+
+def _get_any(d: Dict[str, Any], names: list[str]):
+    for n in names:
+        if isinstance(d, dict) and n in d:
+            return d[n]
+    return None
+
+def _parse_quarter(val: Any) -> Optional[int]:
+    """Hỗ trợ '1', 1, 'Q1', 'Quý 1'… Trả 1..4 hoặc None."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)) and 1 <= int(val) <= 4:
+        return int(val)
+    m = re.search(r'([1-4])', str(val))
+    return int(m.group(1)) if m else None
+
+_TKR_CANDIDATES = ["ticker", "Ticker", "SYMBOL", "Symbol", "stockcode", "StockCode", "Code"]
+_YR_CANDIDATES  = ["year", "Year", "ReportYear"]
+_Q_CANDIDATES   = ["quarter", "Quarter", "ReportQuarter", "Q"]
+
+def _build_row_from_item(item: Dict[str, Any], fallback_ticker: Optional[str], frequency: str) -> Optional[Dict[str, Any]]:
+    # ticker: ưu tiên field trong item, nếu không có dùng key cha (fallback_ticker)
+    tkr = None
+    for k in _TKR_CANDIDATES:
+        v = item.get(k)
+        if v:
+            tkr = v
+            break
+    if not tkr:
+        tkr = fallback_ticker
+    if not tkr:
+        return None
+
+    year = None
+    for k in _YR_CANDIDATES:
+        v = item.get(k)
+        if v is not None:
+            year = pd.to_numeric(v, errors="coerce")
+            break
+
+    quarter_raw = None
+    for k in _Q_CANDIDATES:
+        v = item.get(k)
+        if v is not None:
+            quarter_raw = v
+            break
+    quarter = _parse_quarter(quarter_raw)
+
+    # Ratios root: có thể là 'Ratios', 'FinancialRatios', hoặc trả phẳng
+    ratios_root = item.get("Ratios", item)
+    if isinstance(ratios_root, dict) and "FinancialRatios" in ratios_root:
+        ratios_root = ratios_root["FinancialRatios"]
+
+    found = deep_find_ratios(ratios_root, CANONICAL_KEYS)
+
+    rec = {
+        "ticker": str(tkr).upper(),
+        "year": year,
+    }
+    if frequency == "quarterly":
+        rec["quarter"] = quarter
+
+    rec["PE"] = _to_scalar(found.get("PE"))
+    rec["PB"] = _to_scalar(found.get("PB"))
+    rec["ROE"] = _to_scalar(found.get("ROE"))
+    rec["EPS"] = _to_scalar(found.get("EPS"))
+    rec["BVPS"] = _to_scalar(found.get("BVPS"))
+
+    return rec
+
+def _to_number(x):
+    if isinstance(x, str):
+        xs = x.strip()
+        neg = False
+        if xs.startswith("(") and xs.endswith(")"):
+            xs = xs[1:-1]
+            neg = True
+        if xs.endswith("%"):
+            try:
+                val = float(xs[:-1].replace(",", "")) / 100.0
+                return -val if neg else val
+            except:
+                return pd.to_numeric(xs, errors="coerce")
+        xs = xs.replace(",", "")
+        val = pd.to_numeric(xs, errors="coerce")
+        return -val if (neg and pd.notna(val)) else val
+    return pd.to_numeric(x, errors="coerce")
+
+def _to_scalar(x):
+    # nếu vendor bọc dưới {'Value': 0.123} hoặc {'TTM':..., 'QoQ':..., 'Value':...}
+    if isinstance(x, dict):
+        for k in ["Value", "value", "VAL", "val"]:
+            if k in x:
+                return _to_number(x[k])
+        # fallback: nếu dict có đúng 1 phần tử thì lấy giá trị
+        if len(x) == 1:
+            return _to_number(next(iter(x.values())))
+        return np.nan
+    return _to_number(x)
+
+def _extract_records_container(obj: Dict[str, Any]) -> Optional[list]:
+    """Nếu top-level là dict kiểu {'Data': [...]} thì lấy ra list đó (case-insensitive)."""
+    for k in ["Data", "data", "Items", "items", "Rows", "rows", "Records", "records", "Result", "result"]:
+        if isinstance(obj, dict) and k in obj and isinstance(obj[k], list):
+            return obj[k]
+    return None
+
+def flatten_ratios_payload(fi_dict: Dict[str, Any], frequency: str = "quarterly") -> pd.DataFrame:
+    """
+    Hỗ trợ các dạng payload:
+      A) { 'HPG': [ {...}, ...], 'AAA': [...] }
+      B) [ {...}, {...}, ... ]
+      C) { 'Data': [ {...}, ... ] } / {'Items': [...]} ...
+    """
+    rows = []
+
+    if isinstance(fi_dict, dict):
+        container = _extract_records_container(fi_dict)
+        if container is not None:
+            # Trường hợp C
+            for it in container:
+                if isinstance(it, dict):
+                    rec = _build_row_from_item(it, fallback_ticker=None, frequency=frequency)
+                    if rec: rows.append(rec)
+        else:
+            # Trường hợp A
+            for key, val in fi_dict.items():
+                if isinstance(val, list):
+                    for it in val:
+                        if isinstance(it, dict):
+                            rec = _build_row_from_item(it, fallback_ticker=key, frequency=frequency)
+                            if rec: rows.append(rec)
+                elif isinstance(val, dict):
+                    rec = _build_row_from_item(val, fallback_ticker=key, frequency=frequency)
+                    if rec: rows.append(rec)
+
+    elif isinstance(fi_dict, list):
+        # Trường hợp B
+        for it in fi_dict:
+            if isinstance(it, dict):
+                rec = _build_row_from_item(it, fallback_ticker=None, frequency=frequency)
+                if rec: rows.append(rec)
+
+    # Tạo DataFrame với schema mong đợi
+    expected_cols = ["ticker", "year"] + (["quarter"] if frequency == "quarterly" else []) + ["PE","PB","ROE","EPS","BVPS"]
+    df = pd.DataFrame(rows, columns=expected_cols)
+
+    if df.empty:
+        # vẫn trả về các cột cần thiết để merge không sập
+        if "quarter" in expected_cols and "quarter" not in df.columns:
+            df["quarter"] = pd.Series(dtype="float64")
+        return df
+
+    # Lọc quarter hợp lệ
+    if "quarter" in df.columns:
+        df = df[df["quarter"].isin([1,2,3,4])].copy()
+
+    # đảm bảo có year/quarter hợp lệ
+    if "year" in df.columns:
+        df = df.dropna(subset=["year"])
+    if "quarter" in df.columns:
+        df = df.dropna(subset=["quarter"])
+
+    # Thêm period_end_date
+    if "quarter" in df.columns:
+        df["period_end_date"] = df.apply(lambda r: quarter_end_date(int(r["year"]), int(r["quarter"])), axis=1)
+    else:
+        df["period_end_date"] = pd.to_datetime(dict(year=df["year"], month=12, day=31))
+
+    # Khử trùng lặp
+    df = df.drop_duplicates(subset=[c for c in ["ticker","year","quarter"] if c in df.columns])
+    return df
+
+def build_quarter_end_price(ohlcv: pd.DataFrame) -> pd.DataFrame:
+    """
+    Lấy giá 'close' của NGÀY GIAO DỊCH CUỐI CÙNG trong mỗi (ticker,year,quarter).
+    Trả: [ticker, year, quarter, price_eoq, price_eoq_ts]
+    """
+    o = add_year_quarter_from_timestamp(ohlcv, "timestamp").copy()
+    o = o.sort_values(["ticker", "year", "quarter", "timestamp"])
+
+    # Lấy dòng cuối mỗi nhóm bằng tail(1) (ổn định hơn idxmax + .loc)
+    last = (
+        o.groupby(["ticker", "year", "quarter"], as_index=False)
+         .tail(1)[["ticker", "year", "quarter", "close", "timestamp"]]
+         .rename(columns={"close": "price_eoq", "timestamp": "price_eoq_ts"})
+         .reset_index(drop=True)
+    )
+
+    # Chuẩn kiểu
+    last["price_eoq"] = pd.to_numeric(last["price_eoq"], errors="coerce")
+    return last
+
+
+def compute_eps_ttm(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tính EPS_TTM = tổng EPS của 4 quý gần nhất cho từng ticker.
+    Yêu cầu đủ 4 quý (min_periods=4); nếu thiếu → NaN.
+    """
+    if df.empty:
+        out = df.copy()
+        out["EPS_TTM"] = np.nan
+        return out
+    out = df.sort_values(["ticker", "year", "quarter"]).copy()
+    g = out.groupby("ticker", group_keys=False)
+    out["EPS_TTM"] = g["EPS"].rolling(window=4, min_periods=4).sum().reset_index(level=0, drop=True)
+    return out
+
+
+def attach_pe_ttm(ratios_df: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
+    """
+    Gắn price_eoq, tính PE_TTM = price_eoq / EPS_TTM (chỉ khi EPS_TTM>0).
+    Tạo PE_filled: dùng PE nếu có, nếu NaN thì dùng PE_TTM.
+    """
+    if ratios_df.empty:
+        out = ratios_df.copy()
+        for c in ["EPS_TTM", "price_eoq", "price_eoq_ts", "PE_TTM", "PE_filled"]:
+            out[c] = np.nan
+        return out
+
+    # 1) EPS_TTM
+    out = compute_eps_ttm(ratios_df)
+
+    # 2) Giá cuối quý
+    price_q = build_quarter_end_price(ohlcv)
+    out = out.merge(price_q, on=["ticker", "year", "quarter"], how="left")
+
+    # 3) PE_TTM
+    cond_valid = (out["EPS_TTM"] > 0) & (out["price_eoq"] > 0)
+    out["PE_TTM"] = np.where(cond_valid, out["price_eoq"] / out["EPS_TTM"], np.nan)
+
+    # 4) PE_filled
+    out["PE_filled"] = out["PE"]
+    out.loc[out["PE_filled"].isna(), "PE_filled"] = out["PE_TTM"]
+    return out
+
+def attach_pb_ttm(ratios_df: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tạo PB_TTM bằng BVPS_TTM_base (rolling mean 4 quý; fallback = ffill BVPS),
+    dùng giá cuối quý (price_eoq). Sinh thêm PB_filled (fallback khi PB vendor bị NaN).
+    """
+    if ratios_df.empty:
+        out = ratios_df.copy()
+        for c in ["BVPS_TTM_mean", "BVPS_TTM_base", "PB_TTM", "PB_filled"]:
+            out[c] = np.nan
+        return out
+
+    out = ratios_df.sort_values(["ticker", "year", "quarter"]).copy()
+
+    # Bổ sung giá cuối quý nếu chưa có (tận dụng helper bạn đã có)
+    if "price_eoq" not in out.columns:
+        price_q = build_quarter_end_price(ohlcv)
+        out = out.merge(price_q, on=["ticker", "year", "quarter"], how="left")
+
+    g = out.groupby("ticker", group_keys=False)
+    # Trung bình BVPS 4 quý gần nhất (yêu cầu >=2 điểm để đáng tin)
+    out["BVPS_TTM_mean"] = (
+        g["BVPS"].rolling(window=4, min_periods=2).mean().reset_index(level=0, drop=True)
+    )
+    # Fallback: BVPS gần nhất (ffill theo thời gian)
+    out["BVPS_ffill"] = g["BVPS"].ffill()
+    # Cơ sở BVPS để chia: mean nếu có, ngược lại dùng ffill
+    out["BVPS_TTM_base"] = out["BVPS_TTM_mean"].where(out["BVPS_TTM_mean"].notna(), out["BVPS_ffill"])
+
+    # Tính PB_TTM khi hợp lệ
+    cond = (out["BVPS_TTM_base"] > 0) & (out["price_eoq"] > 0)
+    out["PB_TTM"] = np.where(cond, out["price_eoq"] / out["BVPS_TTM_base"], np.nan)
+
+    # PB_filled: ưu tiên PB vendor, nếu trống dùng PB_TTM
+    out["PB_filled"] = out["PB"]
+    out.loc[out["PB_filled"].isna(), "PB_filled"] = out["PB_TTM"]
+
+    # Dọn cột phụ nếu muốn
+    out.drop(columns=["BVPS_ffill"], inplace=True)
+    return out
+
+
+def attach_eps_ttm_yoy(ratios_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tạo EPS_TTM_yoy = pct_change của EPS_TTM với lag = 4 quý (TTM vs TTM của 1 năm trước).
+    """
+    if ratios_df.empty:
+        out = ratios_df.copy()
+        out["EPS_TTM_yoy"] = np.nan
+        return out
+    out = ratios_df.sort_values(["ticker", "year", "quarter"]).copy()
+    if "EPS_TTM" not in out.columns:
+        # đảm bảo đã chạy attach_pe_ttm (nơi tạo EPS_TTM). Nếu chưa có thì khởi tạo NaN.
+        out["EPS_TTM"] = np.nan
+    out["EPS_TTM_yoy"] = out.groupby("ticker", group_keys=False)["EPS_TTM"].pct_change(4)
+    out["EPS_TTM_yoy"] = out["EPS_TTM_yoy"].replace([np.inf, -np.inf], np.nan)
+    return out
+
+def attach_preferred_valuation(ratios_df: pd.DataFrame, prefer: str = "PE_over_PB") -> pd.DataFrame:
+    """
+    Tạo 2 cột:
+      - valuation_pref: hệ số định giá ưu tiên (ưu tiên PE_filled, fallback PB_filled)
+      - valuation_pref_metric: dùng "PE" hay "PB"
+    Quy tắc hợp lệ: chỉ dùng giá trị > 0 (loại bỏ âm/0/inf/NaN).
+    """
+    out = ratios_df.copy()
+
+    for c in ["PE_filled", "PB_filled"]:
+        if c not in out.columns:
+            out[c] = np.nan
+        out[c] = pd.to_numeric(out[c], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    pe_valid = out["PE_filled"].gt(0)
+    pb_valid = out["PB_filled"].gt(0)
+
+    out["valuation_pref"] = np.nan
+    out["valuation_pref_metric"] = np.nan
+
+    if prefer == "PE_over_PB":
+        # Ưu tiên PE_filled
+        out.loc[pe_valid, "valuation_pref"] = out.loc[pe_valid, "PE_filled"]
+        out.loc[pe_valid, "valuation_pref_metric"] = "PE"
+        need_fill = out["valuation_pref"].isna() & pb_valid
+        out.loc[need_fill, "valuation_pref"] = out.loc[need_fill, "PB_filled"]
+        out.loc[need_fill, "valuation_pref_metric"] = "PB"
+    elif prefer == "PB_over_PE":
+        # Ưu tiên PB_filled
+        out.loc[pb_valid, "valuation_pref"] = out.loc[pb_valid, "PB_filled"]
+        out.loc[pb_valid, "valuation_pref_metric"] = "PB"
+        need_fill = out["valuation_pref"].isna() & pe_valid
+        out.loc[need_fill, "valuation_pref"] = out.loc[need_fill, "PE_filled"]
+        out.loc[need_fill, "valuation_pref_metric"] = "PE"
+    else:
+        raise ValueError("prefer must be 'PE_over_PB' or 'PB_over_PE'")
+
+    return out
+
+# ---------- Tính tăng trưởng EPS ----------
+def compute_eps_growth(df: pd.DataFrame, frequency: str = "quarterly") -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    out = df.sort_values(["ticker", "year"] + (["quarter"] if frequency == "quarterly" else []))
+    if "EPS" not in out.columns:
+        out["EPS"] = np.nan
+
+    if frequency == "quarterly":
+        out["EPS_g_qoq"] = out.groupby("ticker", group_keys=False)["EPS"].pct_change()
+        out["EPS_g_yoy"] = out.groupby("ticker", group_keys=False)["EPS"].pct_change(4)
+    else:
+        out["EPS_g_yoy"] = out.groupby("ticker", group_keys=False)["EPS"].pct_change()
+
+    for c in ["EPS_g_qoq", "EPS_g_yoy"]:
+        if c in out.columns:
+            out[c] = out[c].replace([np.inf, -np.inf], np.nan)
+    return out
+
+
+# ---------- Merge vào OHLCV ----------
+def merge_ratios_into_ohlcv(ohlcv: pd.DataFrame, ratios: pd.DataFrame, frequency: str = "quarterly") -> pd.DataFrame:
+    o = add_year_quarter_from_timestamp(ohlcv, "timestamp").copy()
+
+    # ép kiểu an toàn
+    o["year"] = o["year"].astype("int64")
+    o["quarter"] = o["quarter"].astype("int64")
+
+    r = ratios.copy()
+    for k in ["year", "quarter"]:
+        if k in r.columns:
+            r[k] = pd.to_numeric(r[k], errors="coerce").astype("Int64")
+            r = r.dropna(subset=[k])
+            r[k] = r[k].astype("int64")
+
+    keys = ["ticker", "year"] + (["quarter"] if frequency == "quarterly" else [])
+
+    # đảm bảo ratios có đủ cột khóa
+    for k in keys:
+        if k not in r.columns:
+            r[k] = pd.Series(dtype=o[k].dtype if k in o.columns else "float64")
+
+    merged = o.merge(
+        r.drop(columns=["period_end_date"], errors="ignore"),
+        on=keys, how="left", validate="m:1"
+    )
+    return merged
+
+# ---------- Gọi API theo batch ----------
+def chunked(lst: List[str], size: int):
+    for i in range(0, len(lst), size):
+        yield lst[i:i+size]
+
+def _merge_ratios_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
+    if not isinstance(src, dict):
+        return
+    for t, items in src.items():
+        if t not in dst:
+            dst[t] = []
+        if isinstance(items, list):
+            dst[t].extend(items)
+        elif isinstance(items, dict):
+            dst[t].append(items)
+        # nếu None hoặc kiểu lạ thì bỏ qua
+
+def get_ratios_batched(client,
+                       tickers: List[str],
+                       latest_year: int,
+                       number_of_period: int,
+                       consolidated: bool = True) -> Dict[str, Any] | List[Dict[str, Any]]:
+    fa = client.FundamentalAnalysis()
+    out_dict: Dict[str, Any] = {}
+    out_list: List[Dict[str, Any]] = []
+
+    for i, batch in enumerate(chunked(tickers, BATCH_SIZE), start=1):
+        def _once():
+            return fa.get_ratios(
+                tickers=batch,
+                TimeFilter="Quarterly",
+                NumberOfPeriod=number_of_period,
+                LatestYear=latest_year,
+                Consolidated=consolidated,
+                Fields=None  # lấy full để tự dò key
+            )
+        fi_dict = call_with_retry(_once, max_retries=5, base_sleep=0.6, max_sleep=6.0)
+
+        if isinstance(fi_dict, dict):
+            # gộp dạng dict (key = ticker)
+            for t, items in fi_dict.items():
+                out_dict.setdefault(t, [])
+                if isinstance(items, list):
+                    out_dict[t].extend(items)
+                elif isinstance(items, dict):
+                    out_dict[t].append(items)
+        elif isinstance(fi_dict, list):
+            # gộp dạng list record
+            out_list.extend([x for x in fi_dict if isinstance(x, dict)])
+
+        time.sleep(BATCH_SLEEP_SEC)
+
+    # Trả về theo format mà flatten xử lý được
+    if out_list and not out_dict:
+        return out_list
+    if out_list and out_dict:
+        return {"Data": out_list, **out_dict}
+    return out_dict
+
+
+# ---------- Pipeline chính ----------
+def build_ratios_dataframe_for_hnx(
+    ohlcv: pd.DataFrame,
+    from_date: pd.Timestamp,
+    to_date: pd.Timestamp,
+    type_: str = "consolidated"
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    tickers = extract_hnx_tickers(ohlcv)
+    if not tickers:
+        raise ValueError("Không tìm thấy mã nào trong OHLCV.")
+
+    latest_year, number_of_period = compute_quarter_params(from_date, to_date)
+    consolidated_flag = (str(type_).lower() == "consolidated")
+
+    client = FiinSession(username=USERNAME, password=PASSWORD).login()
+
+    ratios_raw = get_ratios_batched(
+        client=client,
+        tickers=tickers,
+        latest_year=latest_year,
+        number_of_period=number_of_period,
+        consolidated=consolidated_flag
+    )
+
+    print(f"[INFO] LatestYear={latest_year}, NumberOfPeriod={number_of_period}, tickers={len(tickers)}")
+
+    # Peek top-level
+    print("[INFO] ratios_raw type:", type(ratios_raw))
+    if isinstance(ratios_raw, dict):
+        print("[INFO] top keys sample:", list(ratios_raw.keys())[:5])
+        container = _extract_records_container(ratios_raw)
+        if container is not None and isinstance(container, list) and container:
+            print("[INFO] container first record keys:", list(container[0].keys())[:12])
+        else:
+            first_key = next(iter(ratios_raw), None)
+            if first_key:
+                v = ratios_raw[first_key]
+                if isinstance(v, list) and v:
+                    print("[INFO] first list record keys:", list(v[0].keys())[:12])
+                elif isinstance(v, dict):
+                    print("[INFO] first dict record keys:", list(v.keys())[:12])
+    elif isinstance(ratios_raw, list) and ratios_raw:
+        print("[INFO] first list record keys:", list(ratios_raw[0].keys())[:12])
+
+    ratios_df = flatten_ratios_payload(ratios_raw, frequency="quarterly")
+
+    print("[INFO] ratios_df shape:", ratios_df.shape)
+    print("[INFO] ratios_df columns:", list(ratios_df.columns))
+    print("[INFO] ratios_df head:\n", ratios_df.head(3))
+
+    if not ratios_df.empty:
+        ratios_df = ratios_df[
+            (ratios_df["period_end_date"] >= from_date) &
+            (ratios_df["period_end_date"] <= to_date)
+        ].reset_index(drop=True)
+
+    ratios_df = compute_eps_growth(ratios_df, frequency="quarterly")
+
+    ratios_df = attach_pe_ttm(ratios_df, ohlcv)
+
+    ratios_df = attach_pb_ttm(ratios_df, ohlcv)  # <-- thêm dòng này
+    ratios_df = attach_eps_ttm_yoy(ratios_df)  # <-- và dòng này
+
+    ratios_df = attach_preferred_valuation(ratios_df, prefer="PE_over_PB")
+    print("[INFO] valuation_pref null ratio:", ratios_df["valuation_pref"].isna().mean())
+
+    # rank riêng trong từng metric (rẻ = rank nhỏ)
+    ratios_df["valuation_rank_in_metric"] = ratios_df.groupby(
+        ["year", "quarter", "valuation_pref_metric"]
+    )["valuation_pref"].rank(method="average", ascending=True, na_option="keep")
+
+    print("[INFO] extra cols:", ["EPS_TTM", "price_eoq", "price_eoq_ts", "PE_TTM", "PE_filled"],
+          "-> null ratio:", ratios_df[["EPS_TTM", "price_eoq", "PE_TTM", "PE_filled"]].isna().mean().to_dict())
+
+    merged_df = merge_ratios_into_ohlcv(ohlcv, ratios_df, frequency="quarterly")
+    return ratios_df, merged_df
+
+# ---------- Ví dụ sử dụng ----------
+ohlcv = pd.read_csv("../../data/cleaned_stocks.csv")
+ratios_df, merged_df = build_ratios_dataframe_for_hnx(
+    ohlcv=ohlcv,
+    from_date=FROM_DATE,
+    to_date=TO_DATE,
+    type_=FIN_TYPE
+)
+
+ratios_df.to_csv("../../data/HNX_fundamental_ratios_quarterly.csv", index=False)
+merged_df.to_csv("../../data/HNX_ohlcv_with_fundamentals.csv", index=False)

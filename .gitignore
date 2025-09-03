@@ -31,3 +31,6 @@ coverage/
 *.swp
 
 *.env
+
+HNX_ohlcv_with_fundamentals.csv
+HNX_fundamental_ratios_quarterly.csv
