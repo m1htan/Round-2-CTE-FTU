@@ -74,7 +74,7 @@ if all_data:
     print(df_all.head())
 
     # Export CSV
-    out_path = f"../../data/raw_stocks.csv"
+    out_path = f"../../data/step_1/raw_stocks.csv"
     df_all.to_csv(out_path, index=False)
     print(f"Đã lưu file: {out_path}")
 else:

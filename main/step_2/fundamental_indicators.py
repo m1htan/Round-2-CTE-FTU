@@ -3,10 +3,8 @@ from FiinQuantX import FiinSession
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime, date
 import time
 import re
-import json
 import random
 from dotenv import load_dotenv
 
@@ -16,20 +14,18 @@ USERNAME = os.getenv("FIINQUANT_USERNAME")
 PASSWORD = os.getenv("FIINQUANT_PASSWORD")
 
 client = FiinSession(username=USERNAME, password=PASSWORD).login()
-# Khoảng thời gian như bạn yêu cầu
+
 FROM_DATE = pd.Timestamp("2022-01-01")
 TO_DATE   = pd.Timestamp("2025-08-30")
 
-# Type theo yêu cầu
 FIN_TYPE = "consolidated"
 
 # ------------------------------------------------
 
-# Batching khi gọi API get_ratios
 BATCH_SIZE = 10
-BATCH_SLEEP_SEC = 0.2  # nghỉ nhẹ giữa các batch để tránh rate limit
+BATCH_SLEEP_SEC = 0.2
 
-# ---------- Helper: thời gian/quarter ----------
+# Helper: thời gian/quarter
 def quarter_of_month(m: int) -> int:
     return (m - 1) // 3 + 1
 
@@ -47,30 +43,26 @@ def years_and_quarters_in_range(start_ts: pd.Timestamp, end_ts: pd.Timestamp) ->
     quarters = [1, 2, 3, 4]
     return years, quarters
 
-# ---------- Helper: xử lý OHLCV ----------
+# Helper: xử lý OHLCV
 def add_year_quarter_from_timestamp(df: pd.DataFrame, ts_col: str = "timestamp") -> pd.DataFrame:
     out = df.copy()
     out[ts_col] = pd.to_datetime(out[ts_col])
     out["year"] = out[ts_col].dt.year
     out["quarter"] = ((out[ts_col].dt.month - 1) // 3 + 1).astype(int)
-    # Chuẩn ticker viết hoa để đồng nhất
+
     out["ticker"] = out["ticker"].astype(str).str.upper()
     return out
 
 def extract_hnx_tickers(ohlcv: pd.DataFrame) -> List[str]:
-    # Nếu file chỉ chứa HNX thì đơn giản:
-    # Nếu có cột "Exchange", có thể lọc:
-    #   ohlcv = ohlcv.loc[ohlcv["Exchange"].str.upper().eq("HNX")]
     return pd.Index(ohlcv["ticker"].astype(str).str.upper().unique()).tolist()
 
-# ---------- Helper: tìm keys an toàn ----------
+# Helper: tìm keys an toàn
 def normalize_key(k: str) -> str:
-    # Bỏ non-alnum, upper-case để so sánh an toàn: "P/E" -> "PE", "BookValuePerShare" -> "BOOKVALUEPERSHARE"
     return re.sub(r"[^A-Za-z0-9]+", "", str(k)).upper()
 
 CANONICAL_KEYS = {"PE", "PB", "ROE", "EPS", "BVPS"}
 
-# Một số synonym phổ biến (đề phòng vendor đặt tên hơi khác)
+# Một số synonym phổ biến
 SYNONYM_TO_CANON = {
     "PBR": "PB",
     "PRICETOBOOK": "PB",
@@ -111,9 +103,8 @@ def deep_find_ratios(obj: Any, targets: set) -> Dict[str, Any]:
         for k, v in obj.items():
             canon = canonical_of(k)
             if canon in targets and canon not in found:
-                # Ưu tiên key đầu tiên tìm thấy; nếu cần ưu tiên TTM hay Basic có thể chỉnh logic ở đây
                 found[canon] = v
-            # Duyệt sâu
+
             child_found = deep_find_ratios(v, targets)
             for ck, cv in child_found.items():
                 if ck not in found:
@@ -151,14 +142,12 @@ def compute_quarter_params(from_date: pd.Timestamp, to_date: pd.Timestamp) -> tu
     Trả về (LatestYear, NumberOfPeriod) cho TimeFilter='Quarterly'
     sao cho cover các quý có period_end_date trong [from_date, to_date].
     """
-    # Xác định quý bắt đầu (kết thúc quý >= from_date)
     y, q = int(from_date.year), int((from_date.month - 1)//3 + 1)
     start_end = quarter_end_date(y, q)
     while start_end < from_date:
         y, q = iter_quarter_after(y, q)
         start_end = quarter_end_date(y, q)
 
-    # Lặp đến quý cuối có end_date <= to_date
     quarters = []
     cy, cq = y, q
     while True:
@@ -169,8 +158,6 @@ def compute_quarter_params(from_date: pd.Timestamp, to_date: pd.Timestamp) -> tu
         cy, cq = iter_quarter_after(cy, cq)
 
     if not quarters:
-        # Không có quý nào trọn vẹn trong khoảng → vẫn trả về quý của to_date để lib trả dữ liệu,
-        # rồi ta sẽ lọc sau (ratios_df sẽ rỗng nếu không khớp).
         last_year = to_date.year
         return last_year, 1
 
@@ -226,7 +213,6 @@ def _build_row_from_item(item: Dict[str, Any], fallback_ticker: Optional[str], f
             break
     quarter = _parse_quarter(quarter_raw)
 
-    # Ratios root: có thể là 'Ratios', 'FinancialRatios', hoặc trả phẳng
     ratios_root = item.get("Ratios", item)
     if isinstance(ratios_root, dict) and "FinancialRatios" in ratios_root:
         ratios_root = ratios_root["FinancialRatios"]
@@ -267,12 +253,11 @@ def _to_number(x):
     return pd.to_numeric(x, errors="coerce")
 
 def _to_scalar(x):
-    # nếu vendor bọc dưới {'Value': 0.123} hoặc {'TTM':..., 'QoQ':..., 'Value':...}
     if isinstance(x, dict):
         for k in ["Value", "value", "VAL", "val"]:
             if k in x:
                 return _to_number(x[k])
-        # fallback: nếu dict có đúng 1 phần tử thì lấy giá trị
+
         if len(x) == 1:
             return _to_number(next(iter(x.values())))
         return np.nan
@@ -321,12 +306,10 @@ def flatten_ratios_payload(fi_dict: Dict[str, Any], frequency: str = "quarterly"
                 rec = _build_row_from_item(it, fallback_ticker=None, frequency=frequency)
                 if rec: rows.append(rec)
 
-    # Tạo DataFrame với schema mong đợi
     expected_cols = ["ticker", "year"] + (["quarter"] if frequency == "quarterly" else []) + ["PE","PB","ROE","EPS","BVPS"]
     df = pd.DataFrame(rows, columns=expected_cols)
 
     if df.empty:
-        # vẫn trả về các cột cần thiết để merge không sập
         if "quarter" in expected_cols and "quarter" not in df.columns:
             df["quarter"] = pd.Series(dtype="float64")
         return df
@@ -371,7 +354,6 @@ def build_quarter_end_price(ohlcv: pd.DataFrame) -> pd.DataFrame:
     last["price_eoq"] = pd.to_numeric(last["price_eoq"], errors="coerce")
     return last
 
-
 def compute_eps_ttm(df: pd.DataFrame) -> pd.DataFrame:
     """
     Tính EPS_TTM = tổng EPS của 4 quý gần nhất cho từng ticker.
@@ -385,7 +367,6 @@ def compute_eps_ttm(df: pd.DataFrame) -> pd.DataFrame:
     g = out.groupby("ticker", group_keys=False)
     out["EPS_TTM"] = g["EPS"].rolling(window=4, min_periods=4).sum().reset_index(level=0, drop=True)
     return out
-
 
 def attach_pe_ttm(ratios_df: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
     """
@@ -427,7 +408,7 @@ def attach_pb_ttm(ratios_df: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
 
     out = ratios_df.sort_values(["ticker", "year", "quarter"]).copy()
 
-    # Bổ sung giá cuối quý nếu chưa có (tận dụng helper bạn đã có)
+    # Bổ sung giá cuối quý nếu chưa có
     if "price_eoq" not in out.columns:
         price_q = build_quarter_end_price(ohlcv)
         out = out.merge(price_q, on=["ticker", "year", "quarter"], how="left")
@@ -450,10 +431,9 @@ def attach_pb_ttm(ratios_df: pd.DataFrame, ohlcv: pd.DataFrame) -> pd.DataFrame:
     out["PB_filled"] = out["PB"]
     out.loc[out["PB_filled"].isna(), "PB_filled"] = out["PB_TTM"]
 
-    # Dọn cột phụ nếu muốn
+    # Dọn cột phụ
     out.drop(columns=["BVPS_ffill"], inplace=True)
     return out
-
 
 def attach_eps_ttm_yoy(ratios_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -510,7 +490,7 @@ def attach_preferred_valuation(ratios_df: pd.DataFrame, prefer: str = "PE_over_P
 
     return out
 
-# ---------- Tính tăng trưởng EPS ----------
+# Tính tăng trưởng EPS
 def compute_eps_growth(df: pd.DataFrame, frequency: str = "quarterly") -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -529,12 +509,10 @@ def compute_eps_growth(df: pd.DataFrame, frequency: str = "quarterly") -> pd.Dat
             out[c] = out[c].replace([np.inf, -np.inf], np.nan)
     return out
 
-
-# ---------- Merge vào OHLCV ----------
+# Merge vào OHLCV
 def merge_ratios_into_ohlcv(ohlcv: pd.DataFrame, ratios: pd.DataFrame, frequency: str = "quarterly") -> pd.DataFrame:
     o = add_year_quarter_from_timestamp(ohlcv, "timestamp").copy()
 
-    # ép kiểu an toàn
     o["year"] = o["year"].astype("int64")
     o["quarter"] = o["quarter"].astype("int64")
 
@@ -558,7 +536,7 @@ def merge_ratios_into_ohlcv(ohlcv: pd.DataFrame, ratios: pd.DataFrame, frequency
     )
     return merged
 
-# ---------- Gọi API theo batch ----------
+# Gọi API theo batch
 def chunked(lst: List[str], size: int):
     for i in range(0, len(lst), size):
         yield lst[i:i+size]
@@ -573,7 +551,6 @@ def _merge_ratios_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> None:
             dst[t].extend(items)
         elif isinstance(items, dict):
             dst[t].append(items)
-        # nếu None hoặc kiểu lạ thì bỏ qua
 
 def get_ratios_batched(client,
                        tickers: List[str],
@@ -592,7 +569,7 @@ def get_ratios_batched(client,
                 NumberOfPeriod=number_of_period,
                 LatestYear=latest_year,
                 Consolidated=consolidated,
-                Fields=None  # lấy full để tự dò key
+                Fields=None
             )
         fi_dict = call_with_retry(_once, max_retries=5, base_sleep=0.6, max_sleep=6.0)
 
@@ -617,8 +594,7 @@ def get_ratios_batched(client,
         return {"Data": out_list, **out_dict}
     return out_dict
 
-
-# ---------- Pipeline chính ----------
+# Pipeline chính
 def build_ratios_dataframe_for_hnx(
     ohlcv: pd.DataFrame,
     from_date: pd.Timestamp,
@@ -678,8 +654,8 @@ def build_ratios_dataframe_for_hnx(
 
     ratios_df = attach_pe_ttm(ratios_df, ohlcv)
 
-    ratios_df = attach_pb_ttm(ratios_df, ohlcv)  # <-- thêm dòng này
-    ratios_df = attach_eps_ttm_yoy(ratios_df)  # <-- và dòng này
+    ratios_df = attach_pb_ttm(ratios_df, ohlcv)
+    ratios_df = attach_eps_ttm_yoy(ratios_df)
 
     ratios_df = attach_preferred_valuation(ratios_df, prefer="PE_over_PB")
     print("[INFO] valuation_pref null ratio:", ratios_df["valuation_pref"].isna().mean())
@@ -695,8 +671,8 @@ def build_ratios_dataframe_for_hnx(
     merged_df = merge_ratios_into_ohlcv(ohlcv, ratios_df, frequency="quarterly")
     return ratios_df, merged_df
 
-# ---------- Ví dụ sử dụng ----------
-ohlcv = pd.read_csv("../../data/cleaned_stocks.csv")
+# Usage
+ohlcv = pd.read_csv("../../data/step_1/cleaned_stocks.csv")
 ratios_df, merged_df = build_ratios_dataframe_for_hnx(
     ohlcv=ohlcv,
     from_date=FROM_DATE,
@@ -704,5 +680,5 @@ ratios_df, merged_df = build_ratios_dataframe_for_hnx(
     type_=FIN_TYPE
 )
 
-ratios_df.to_csv("../../data/HNX_fundamental_ratios_quarterly.csv", index=False)
-merged_df.to_csv("../../data/HNX_ohlcv_with_fundamentals.csv", index=False)
+ratios_df.to_csv("../../data/step_2/HNX_fundamental_ratios_quarterly.csv", index=False)
+merged_df.to_csv("../../data/step_2/HNX_ohlcv_with_fundamentals.csv", index=False)

@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-df = pd.read_csv('../../data/cleaned_stocks.csv')
+df = pd.read_csv('../../data/step_1/cleaned_stocks.csv')
 df['timestamp'] = pd.to_datetime(df['timestamp'])
 print(df.head())
 

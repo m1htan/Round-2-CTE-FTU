@@ -1,14 +1,13 @@
 import os
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional
+from typing import Dict
 from FiinQuantX import FiinSession
 from dotenv import load_dotenv
 
-# =============== CONFIG ===============
-INPUT_FA = "../../data/HNX_ohlcv_with_fundamentals.csv"
-OUTPUT_TA_ONLY = "../../data/HNX_ta_indicators.csv"
-OUTPUT_FA_MERGED = "../../data/HNX_ohlcv_with_fundamentals.csv"
+INPUT_FA = "../../data/step_2/HNX_ohlcv_with_fundamentals.csv"
+OUTPUT_TA_ONLY = "../../data/step_2/HNX_technical_indicators.csv"
+OUTPUT_FA_MERGED = "../../data/step_2/HNX_ohlcv_with_fundamentals.csv"
 
 USE_FIIN = True
 FIIN_FLAGS = {
@@ -23,7 +22,7 @@ FIIN_FLAGS = {
     "smc_ob": True,
     "smc_liquidity": True,
 }
-# Tham số các chỉ báo core
+
 PARAMS = {
     "sma": [20, 50, 200],
     "ema": [12, 26],
@@ -40,7 +39,6 @@ PARAMS = {
     "adx": 14,
 }
 
-# =============== CORE HELPERS ===============
 REQUIRED_OHLCV = ["timestamp","ticker","open","high","low","close","volume"]
 
 def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -132,7 +130,6 @@ def adx_wilder(high, low, close, window=14):
     adx = dx.ewm(alpha=1/window, adjust=False, min_periods=window).mean()
     return adx, plus_di, minus_di
 
-# =============== CORE PIPELINE ===============
 def add_core_indicators(ohlcv: pd.DataFrame, params: Dict) -> pd.DataFrame:
     o = _ensure_schema(ohlcv).copy()
     g = o.groupby("ticker", group_keys=False)
@@ -203,7 +200,6 @@ def add_core_indicators(ohlcv: pd.DataFrame, params: Dict) -> pd.DataFrame:
 
     return o
 
-# =============== OPTIONAL: FINN ADVANCED ===============
 def add_fiin_indicators(df: pd.DataFrame,
                         client: FiinSession,
                         flags: Dict[str, bool]) -> pd.DataFrame:
@@ -232,8 +228,6 @@ def add_fiin_indicators(df: pd.DataFrame,
         c = d["close"].reset_index(drop=True)
         v = d["volume"].reset_index(drop=True) if "volume" in d else None
         return o, h, l, c, v
-
-    # ===== Ví dụ vá cho từng chỉ báo =====
 
     # PSAR
     if flags.get("psar"):
@@ -309,16 +303,15 @@ def add_fiin_indicators(df: pd.DataFrame,
 
     return out
 
-# =============== MAIN RUN ===============
 if __name__ == "__main__":
     # 1) đọc dataset FA (daily)
     base = pd.read_csv(INPUT_FA)
-    base = _ensure_schema(base)  # giữ nguyên các cột FA khác
+    base = _ensure_schema(base)
 
     # 2) tính TA core
     ta_all = add_core_indicators(base[REQUIRED_OHLCV + ["Exchange"] if "Exchange" in base.columns else REQUIRED_OHLCV], PARAMS)
 
-    # 3) (optional) thêm chỉ báo nâng cao từ Fiin
+    # 3)thêm chỉ báo nâng cao từ FiinQuantX
     if USE_FIIN:
         load_dotenv(dotenv_path='../../config/.env')
         USERNAME = os.getenv("FIINQUANT_USERNAME")
@@ -330,7 +323,7 @@ if __name__ == "__main__":
     ta_cols = [c for c in ta_all.columns if c not in base.columns]  # các cột mới sinh
     ta_all[ta_cols] = ta_all.groupby("ticker")[ta_cols].ffill()
 
-    # 5) Drop warm-up: giữ từ khi có sma_200 (nếu có trong cấu hình)
+    # 5) Drop warm-up: giữ từ khi có sma_200
     warmup_col = "sma_200" if "sma_200" in ta_all.columns else None
     if warmup_col:
         ta_all = ta_all[~ta_all[warmup_col].isna()].copy()

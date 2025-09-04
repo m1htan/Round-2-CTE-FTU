@@ -33,4 +33,7 @@ coverage/
 *.env
 
 HNX_ohlcv_with_fundamentals.csv
-HNX_ta_indicators.csv
+HNX_technical_indicators.csv
+
+part_1_cleaned_ohlcv_with_fundamentals_and_technical.csv
+part_2_cleaned_ohlcv_with_fundamentals_and_technical.csv

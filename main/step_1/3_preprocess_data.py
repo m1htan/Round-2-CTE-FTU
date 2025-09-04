@@ -54,9 +54,9 @@ def clean_trading_data(df: pd.DataFrame) -> pd.DataFrame:
     return df_clean
 
 
-df = pd.read_csv('../../data/raw_stocks.csv')
+df = pd.read_csv('../../data/step_1/raw_stocks.csv')
 df_clean = clean_trading_data(df)
 
-out_path = "../../data/cleaned_stocks.csv"
+out_path = "../../data/step_1/cleaned_stocks.csv"
 df_clean.to_csv(out_path, index=False)
 print(f"Đã lưu file cleaned: {out_path}, shape={df_clean.shape}")
