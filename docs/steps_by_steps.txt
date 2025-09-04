@@ -1,14 +1,38 @@
----
-Step 1:
----
-1. Crawl data sử dụng FiinQuant (File crawl_data.py trong thư mục main)
-    Crawl của 3 sàn: VNINDEX (HOSE), HNXIndex (HNX), UPCOMIndex (UPCOM)
-2. Gom toàn bộ dữ liệu vào thành 1 df duy nhất
-3. Lưu ra file csv tại thư mục data
-4. Kiểm tra độ tin cậy dữ liệu (kiểm tra sơ lược ban đầu)
-5. Tiền xử lý dữ liệu (xóa duplicates, fill out missing data, ...)
-6. EDA
----
-Step 2:
----
+* Step 0:---------------------------------------------------------------------------------------------------------------
+
+1. (QUAN TRỌNG) Tạo một file .env trong thư mục config
+2. (QUAN TRỌNG) Điền FIINQUANT_USERNAME và FIINQUANT_PASSWORD theo tài khoản và mật khẩu được BTC cung cấp
+3. (QUAN TRỌNG) chạy file requirements.txt
+
+* Step 1:---------------------------------------------------------------------------------------------------------------
+
+0. Chạy các file lần lượt theo tiền tố được gán trước tên file (1 --> 2 --> 3 --> 4)
+1. Chạy file 1_crawl_data.py (nhớ chú ý dường dẫn file)
+2. Chạy file 2_validation_data.py (nhớ chú ý dường dẫn file)
+3. Chạy file 3_preprocess_data.py (nhớ chú ý dường dẫn file)
+4. (Optional) Chạy file 4_EDA_data.py (nhớ chú ý dường dẫn file)
+    --> Toàn bộ dữ liệu sinh ra sẽ được lưu tại thư mục data/step_1
+
+* Step 2:---------------------------------------------------------------------------------------------------------------
+
 1. Fundamental Indicators
+    Chạy file fundamental_indicators.py trong thư mục main/step_2 (nhớ chú ý đường dẫn thư mục)
+2. Technical Indicators
+    Chạy file technical_indicators.py trong thư mục main/step_2 (nhớ chú ý đường dẫn thư mục)
+3. Xử lý dữ liệu sau khi thêm các trường dữ liệu FI và TI
+    Chạy file data_processing_part_1.py trước rồi tới data_processing_part_2.py
+    --> Toàn bộ dữ liệu sinh ra sẽ được lưu tại thư mục data/step_2
+
+* Step 3:---------------------------------------------------------------------------------------------------------------
+
+
+
+* Step 4:---------------------------------------------------------------------------------------------------------------
+
+
+
+* Step 5:---------------------------------------------------------------------------------------------------------------
+
+
+---
+* Step 6:---------------------------------------------------------------------------------------------------------------

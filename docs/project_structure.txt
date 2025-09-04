@@ -1,15 +1,38 @@
 Round-2-CTE-FTU
     config
-        .env
+        .env                                                            # Chứa các biến môi trường của dự án
     data
-
+        step_1
+            cleaned_stocks.csv                                          # Dữ liệu sau khi xử lý từ dữ liệu thô
+            raw_stocks.csv                                              # Dữ liệu thô sau khi crawl về từ HNXIndex
+        step_2
+            HNX_fundamental_ratios_quarterly.csv                        # Dữ liệu FI
+            HNX_ohlcv_with_fundamentals.csv                             # Dữ liệu merge FI và OHLCV
+            HNX_technical_indicators.csv                                # Dữ liệu TI
+            null_report_before_after.csv                                # So sánh dữ liệu trước và sau khi xử lý
+            part_1_cleaned_ohlcv_with_fundamentals_and_technical.csv    # Dữ liệu sau khi xử lý lần 1
+            part_2_cleaned_ohlcv_with_fundamentals_and_technical.csv    # Dữ liệu sau khi xử lý lần 2
     docs
-        steps_by_steps.txt
-        project_structure.txt
-    logs
+        steps_by_steps.txt                                              # Hướng dẫn sử dụng
+        project_structure.txt                                           # Cấu trúc thư mục dự án
     main
-        crawl_data.py
-        validation_data.py
+        step_1
+            1_crawl_data.py
+            2_validation_data.py
+            3_preprocess_data.py
+            4_EDA_data.py
+        step_2
+            data_processing_part_1.py
+            data_processing_part_2.py
+            fundamental_indicators.py
+            technical_indicators.py
     test
+        test_check_null_col_in_dataset.py
+        test_check_signature_FA.py
         test_connections.py
         test_login.py
+
+    .gitattributes
+    .gitignore
+    README.md
+    requirements.txt
