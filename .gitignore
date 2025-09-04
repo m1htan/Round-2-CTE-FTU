@@ -34,8 +34,5 @@ coverage/
 
 *.log
 *.xls;xlsx;csv
-data/step_1
-data/step_2
-data/step_3
-data/step_4
-data/step_5
+*.csv
+docs/Đề bài vòng 2 - Bảng ĐH - DSTC 2025.pdf
