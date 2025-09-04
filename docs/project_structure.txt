@@ -12,9 +12,21 @@ Round-2-CTE-FTU
             null_report_before_after.csv                                # So sánh dữ liệu trước và sau khi xử lý
             part_1_cleaned_ohlcv_with_fundamentals_and_technical.csv    # Dữ liệu sau khi xử lý lần 1
             part_2_cleaned_ohlcv_with_fundamentals_and_technical.csv    # Dữ liệu sau khi xử lý lần 2
+        step_3
+            HNX_picks_daily.csv
+            HNX_signals_daily.csv
+            step_3_merged.csv
+        step_4
+
+        step_5
+
+        step_6
+
     docs
         steps_by_steps.txt                                              # Hướng dẫn sử dụng
         project_structure.txt                                           # Cấu trúc thư mục dự án
+    logs
+        step4_progress.log
     main
         step_1
             1_crawl_data.py
@@ -26,7 +38,18 @@ Round-2-CTE-FTU
             data_processing_part_2.py
             fundamental_indicators.py
             technical_indicators.py
+        step_3
+            filtering.py
+        step_4
+            ML.py
+        step_5
+            backtest.py                                                 # File backtest
+        step_6
+
+    output_backtest                                                     # Thư mục chứa đầu ra của backtest (bảng biểu, hình ảnh)
+    output_stress_test                                                  # Thư mục chứa đầu ra của stress_test (bảng biểu, hình ảnh)
     test
+        test_backtest.py
         test_check_null_col_in_dataset.py
         test_check_signature_FA.py
         test_connections.py

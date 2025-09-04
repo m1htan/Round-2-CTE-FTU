@@ -25,14 +25,18 @@
 
 * Step 3:---------------------------------------------------------------------------------------------------------------
 
-
+1. Chạy file filtering.py (nhớ chú ý dường dẫn file)
 
 * Step 4:---------------------------------------------------------------------------------------------------------------
 
-
+1. Chạy file ML.py (nhớ chú ý dường dẫn file)
 
 * Step 5:---------------------------------------------------------------------------------------------------------------
 
+1. Chạy file backtest.py (nhớ chú ý dường dẫn file)
+2. Xem output của file backtest (biểu đồ, bảng biểu, ...) trong thư mục output_backtest
 
----
 * Step 6:---------------------------------------------------------------------------------------------------------------
+
+1. Chạy file stress_test.py (nhớ chú ý dường dẫn file)
+2. Xem output của file stress_test (biểu đồ, bảng biểu, ...) trong thư mục output_stress_test

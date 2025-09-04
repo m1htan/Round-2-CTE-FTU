@@ -1,0 +1,13 @@
+Benchmark: HNX-Index (file)
+Mode picks: RULE | TOP_N=20 | SHIFT=1 | COST=0bp | SLIP=0bp
+=== Full period ===
+Strategy: cum=9.09%, ann=2.87%, vol=9.24%, sharpe=0.31, mdd=-7.31%, winrate=0.52%
+Benchmark: cum=-76.94%, ann=-37.98%, vol=4861.47%, sharpe=-0.01, mdd=-100.00%, winrate=50.26%
+
+=== Stress windows ===
+     start        end      tag  bench_cumret  strat_cumret  strat_mdd  strat_winrate  strat_sharpe  trades  avg_turnover  p5_daily
+2025-03-10 2025-04-04 RET_DROP     -0.977532     -0.073084  -0.073084        0.00000     -2.373221       1      0.100000 -0.003654
+2023-05-16 2023-07-06 RET_DROP     -0.989918      0.000000   0.000000        0.00000           NaN       0      0.000000  0.000000
+2024-10-28 2024-12-19     BOTH     -0.986874      0.000000   0.000000        0.00000           NaN       0      0.000000  0.000000
+2025-04-08 2025-04-29     BOTH     -0.971737      0.000000   0.000000        0.00000           NaN       0      0.000000  0.000000
+2025-06-26 2025-08-22 RET_DROP     -0.997594      0.025000   0.000000        0.02381      2.607783       1      0.047619  0.000000
