@@ -45,17 +45,29 @@ Round-2-CTE-FTU
         step_5
             backtest.py                                                 # File backtest
         step_6
-
+            stress_test.py
     output_backtest                                                     # Thư mục chứa đầu ra của backtest (bảng biểu, hình ảnh)
+            HNX_backtest_daily.csv
+            HNX_backtest_summary.csv
+            HNX_daily_return_hist.png
+            HNX_drawdown.png
+            HNX_equity_curve.csv
+            HNX_equity_curve.png
+            HNX_trade_summary.csv
+            HNX_trades.csv
     output_stress_test                                                  # Thư mục chứa đầu ra của stress_test (bảng biểu, hình ảnh)
+            HNX_stress_daily_returns.csv
+            HNX_stress_plot.png
+            HNX_stress_report.txt
+            HNX_stress_windows.csv
     test
         test_backtest.py
         test_check_null_col_in_dataset.py
         test_check_signature_FA.py
         test_connections.py
         test_login.py
-
     .gitattributes
     .gitignore
+    problem2_CTP.pdf
     README.md
     requirements.txt
