@@ -30,7 +30,7 @@ coverage/
 *.bak
 *.swp
 
-*.env
+#*.env
 
 *.log
 *.xls;xlsx;csv
